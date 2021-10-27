@@ -146,5 +146,65 @@ func (r *Raft) becomeFollower(currentTerm int) {
 }
 
 func (r *Raft) becomeLeader() {
+	r.state = Leader
+	r.dLog("becomes Leader (term=%d). Logs: (%+v)", r.currentTerm, r.logEntries)
 
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			r.sendHeartbeats()
+			<-ticker.C
+
+			r.mu.Lock()
+			if r.state != Leader {
+				r.mu.Unlock()
+				return
+			}
+			r.mu.Unlock()
+		}
+	}()
+}
+
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+
+	PrevLogTerm int
+	Entries     []LogEntry
+
+	LeaderCommit int
+}
+
+type AppendEntriesResult struct {
+	Term    int
+	Success bool
+}
+
+func (r *Raft) sendHeartbeats() {
+	r.mu.Lock()
+	savedCurrentTerm := r.currentTerm
+	r.mu.Unlock()
+
+	for _, peerId := range r.peerIds {
+		args := AppendEntriesArgs{
+			Term:     savedCurrentTerm,
+			LeaderId: r.id,
+		}
+		go func(peerId int) {
+			r.dLog("sending AppendEntries to %d, args=%+v", peerId, args)
+			var response AppendEntriesResult
+			if err := r.server.Call(peerId, "Raft.AppendEntries", args, &response); err == nil {
+				r.mu.Lock()
+				defer r.mu.Unlock()
+				if response.Term > savedCurrentTerm {
+					r.dLog("term out of heartbeat reply (from server=%d)", peerId)
+					r.becomeFollower(response.Term)
+					return
+				}
+			}
+		}(peerId)
+	}
 }
