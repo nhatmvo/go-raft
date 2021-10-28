@@ -32,7 +32,9 @@ type Raft struct {
 	electionResetTime time.Time
 }
 
-func New(id int, peerIds []int, server *Server)
+func New(id int, peerIds []int, server *Server) {
+
+}
 
 func (r *Raft) dLog(format string, args ...interface{}) {
 	if DebugRaft > 0 {
@@ -142,7 +144,13 @@ func (r *Raft) startElection() {
 }
 
 func (r *Raft) becomeFollower(currentTerm int) {
+	r.dLog("becomes Follower (term=%d). logs=%+v", currentTerm, r.logEntries)
+	r.state = Follower
+	r.currentTerm = currentTerm
+	r.votedFor = -1
+	r.electionResetTime = time.Now()
 
+	go r.runElectionTimer()
 }
 
 func (r *Raft) becomeLeader() {
@@ -207,4 +215,55 @@ func (r *Raft) sendHeartbeats() {
 			}
 		}(peerId)
 	}
+}
+
+func (r *Raft) RequestVote(args RequestVoteArgs, response *RequestVoteResult) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == Shutdown {
+		return nil
+	}
+	r.dLog("RequestVote: %+v (currentTerm=%d, votedFor=%d)", args, r.currentTerm, r.votedFor)
+
+	if args.Term > r.currentTerm {
+		r.dLog("current term out of date with RequestVote")
+		r.becomeFollower(args.Term)
+	}
+
+	if args.Term == r.currentTerm && (r.votedFor == -1 || r.votedFor == args.CandidateId) {
+		response.VoteGranted = true
+		r.votedFor = args.CandidateId
+		r.electionResetTime = time.Now()
+	} else {
+		response.VoteGranted = false
+	}
+	response.Term = r.currentTerm
+	r.dLog("RequestVote response: %+v", *response)
+	return nil
+}
+
+func (r *Raft) AppendEntries(args AppendEntriesArgs, response *AppendEntriesResult) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == Shutdown {
+		return nil
+	}
+	r.dLog("AppendEntries: %+v (currentTerm=%d)", args, r.currentTerm)
+
+	if args.Term > r.currentTerm {
+		r.dLog("current term out of date with AppendEntries")
+		r.becomeFollower(args.Term)
+	}
+
+	response.Success = false
+	if args.Term == r.currentTerm {
+		if r.state != Follower {
+			r.becomeFollower(args.Term)
+		}
+		r.electionResetTime = time.Now()
+		response.Success = true
+	}
+	response.Term = r.currentTerm
+	r.dLog("AppendEntries response: %+v", *response)
+	return nil
 }
